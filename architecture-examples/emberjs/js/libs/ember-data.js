@@ -1,5 +1,5 @@
-// Version: v0.13-175-g84d5a96
-// Last commit: 84d5a96 (2013-08-31 09:14:52 -0700)
+// Version: v0.13-180-gabb3fd4
+// Last commit: abb3fd4 (2013-08-31 10:48:41 -0700)
 
 
 (function() {
@@ -280,8 +280,8 @@ Ember.Inflector.inflector = new Ember.Inflector(Ember.Inflector.defaultRules);
 
 
 })();
-// Version: v0.13-175-g84d5a96
-// Last commit: 84d5a96 (2013-08-31 09:14:52 -0700)
+// Version: v0.13-180-gabb3fd4
+// Last commit: abb3fd4 (2013-08-31 10:48:41 -0700)
 
 
 (function() {
@@ -417,6 +417,14 @@ var get = Ember.get, set = Ember.set, isNone = Ember.isNone;
 
 var transforms = DS.JSONTransforms;
 
+// Simple dispatcher to support overriding the aliased
+// method in subclasses.
+function aliasMethod(methodName) {
+  return function() {
+    return this[methodName].apply(this, arguments);
+  };
+}
+
 DS.JSONSerializer = Ember.Object.extend({
   primaryKey: 'id',
 
@@ -530,11 +538,30 @@ DS.JSONSerializer = Ember.Object.extend({
 
   // EXTRACT
 
-  extractPayload: function(type, payload) {
-    var store = get(this, 'store');
-    store.push(type, payload[type.typeKey]);
+  extract: function(store, type, payload, id, requestType) {
+    var specificExtract = "extract" + requestType.charAt(0).toUpperCase() + requestType.substr(1);
+    return this[specificExtract](store, type, payload, id, requestType);
   },
 
+  extractFindAll: aliasMethod('extractArray'),
+  extractFindQuery: aliasMethod('extractArray'),
+  extractFindMany: aliasMethod('extractArray'),
+  extractFindHasMany: aliasMethod('extractArray'),
+
+  extractCreateRecord: aliasMethod('extractSave'),
+  extractUpdateRecord: aliasMethod('extractSave'),
+  extractDeleteRecord: aliasMethod('extractSave'),
+
+  extractFind: aliasMethod('extractSingle'),
+  extractSave: aliasMethod('extractSingle'),
+
+  extractSingle: function(store, type, payload) {
+    return payload;
+  },
+
+  extractArray: function(store, type, payload) {
+    return payload;
+  },
   // HELPERS
 
   typeFor: function(relationship, key, data) {
@@ -2455,32 +2482,56 @@ function isThenable(object) {
   return object && typeof object.then === 'function';
 }
 
+function serializerFor(adapter, type) {
+  var serializer = adapter.serializer,
+      defaultSerializer = adapter.defaultSerializer,
+      container = adapter.container;
+
+
+  if (serializer === undefined) {
+    serializer = container.lookup('serializer:'+type.typeKey) ||
+                 container.lookup('serializer:application') ||
+                 container.lookup('serializer:' + defaultSerializer || 'serializer:_default');
+  }
+
+  if (serializer === null || serializer === undefined) {
+    serializer = {
+      extract: function(store, type, payload) { return payload; }
+    };
+  }
+
+  return serializer;
+}
+
 function _find(adapter, store, type, id, resolver) {
-  var promise = adapter.find(store, type, id);
+  var promise = adapter.find(store, type, id),
+      serializer = serializerFor(adapter, type);
 
   return resolve(promise).then(function(payload) {
     Ember.assert("You made a request for a " + type.typeKey + " with id " + id + ", but the adapter's response did not have any data", payload);
-    payload = adapter.extract(store, type, payload, id, 'find');
+    payload = serializer.extract(store, type, payload, id, 'find');
 
     return store.push(type, payload);
   }).then(resolver.resolve, resolver.reject);
 }
 
 function _findMany(adapter, store, type, ids, owner, resolver) {
-  var promise = adapter.findMany(store, type, ids, owner);
+  var promise = adapter.findMany(store, type, ids, owner),
+      serializer = serializerFor(adapter, type);
 
   return resolve(promise).then(function(payload) {
-    payload = adapter.extract(store, type, payload, null, 'findMany');
+    payload = serializer.extract(store, type, payload, null, 'findMany');
 
     store.pushMany(type, payload);
   }).then(resolver.resolve, resolver.reject);
 }
 
 function _findHasMany(adapter, store, record, link, relationship, resolver) {
-  var promise = adapter.findHasMany(store, record, link, relationship);
+  var promise = adapter.findHasMany(store, record, link, relationship),
+      serializer = serializerFor(adapter, relationship.type);
 
   return resolve(promise).then(function(payload) {
-    payload = adapter.extract(store, relationship.type, payload, null, 'findHasMany');
+    payload = serializer.extract(store, relationship.type, payload, null, 'findHasMany');
 
     var records = store.pushMany(relationship.type, payload);
     record.updateHasMany(relationship.key, records);
@@ -2488,10 +2539,11 @@ function _findHasMany(adapter, store, record, link, relationship, resolver) {
 }
 
 function _findAll(adapter, store, type, sinceToken, resolver) {
-  var promise = adapter.findAll(store, type, sinceToken);
+  var promise = adapter.findAll(store, type, sinceToken),
+      serializer = serializerFor(adapter, type);
 
   return resolve(promise).then(function(payload) {
-    payload = adapter.extract(store, type, payload, null, 'findAll');
+    payload = serializer.extract(store, type, payload, null, 'findAll');
 
     store.pushMany(type, payload);
     store.didUpdateAll(type);
@@ -2500,10 +2552,11 @@ function _findAll(adapter, store, type, sinceToken, resolver) {
 }
 
 function _findQuery(adapter, store, type, query, recordArray, resolver) {
-  var promise = adapter.findQuery(store, type, query, recordArray);
+  var promise = adapter.findQuery(store, type, query, recordArray),
+      serializer = serializerFor(adapter, type);
 
   return resolve(promise).then(function(payload) {
-    payload = adapter.extract(store, type, payload, null, 'findAll');
+    payload = serializer.extract(store, type, payload, null, 'findAll');
 
     recordArray.load(payload);
     return recordArray;
@@ -2512,12 +2565,13 @@ function _findQuery(adapter, store, type, query, recordArray, resolver) {
 
 function _commit(adapter, store, operation, record, resolver) {
   var type = record.constructor,
-      promise = adapter[operation](store, type, record);
+      promise = adapter[operation](store, type, record),
+      serializer = serializerFor(adapter, type);
 
   Ember.assert("Your adapter's '" + operation + "' method must return a promise, but it returned " + promise, isThenable(promise));
 
   return promise.then(function(payload) {
-    payload = adapter.extract(store, type, payload, get(record, 'id'), operation);
+    payload = serializer.extract(store, type, payload, get(record, 'id'), operation);
     store.didSaveRecord(record, payload);
     return record;
   }, function(reason) {
@@ -2810,6 +2864,9 @@ var DirtyState = {
     didSetProperty: didSetProperty,
     becomeDirty: Ember.K,
     pushedData: Ember.K,
+
+    // TODO: More robust semantics around save-while-in-flight
+    willCommit: Ember.K,
 
     didCommit: function(record) {
       var dirtyType = get(this, 'dirtyType');
@@ -3120,6 +3177,9 @@ var RootState = {
       isSaving: true,
 
       // EVENTS
+
+      // TODO: More robust semantics around save-while-in-flight
+      willCommit: Ember.K,
       didCommit: function(record) {
         record.transitionTo('saved');
 
@@ -5250,30 +5310,6 @@ function aliasMethod(methodName) {
 */
 
 DS.Adapter = Ember.Object.extend(DS._Mappable, {
-  extract: function(store, type, payload, id, requestType) {
-    var specificExtract = "extract" + requestType.charAt(0).toUpperCase() + requestType.substr(1);
-    return this[specificExtract](store, type, payload, id, requestType);
-  },
-
-  extractFindAll: aliasMethod('extractArray'),
-  extractFindQuery: aliasMethod('extractArray'),
-  extractFindMany: aliasMethod('extractArray'),
-  extractFindHasMany: aliasMethod('extractArray'),
-
-  extractCreateRecord: aliasMethod('extractSave'),
-  extractUpdateRecord: aliasMethod('extractSave'),
-  extractDeleteRecord: aliasMethod('extractSave'),
-
-  extractFind: aliasMethod('extractSingle'),
-  extractSave: aliasMethod('extractSingle'),
-
-  extractSingle: function(store, type, payload) {
-    return payload;
-  },
-
-  extractArray: function(store, type, payload) {
-    return payload;
-  },
 
   /**
     The `find()` method is invoked when the store is asked for a record that
@@ -5448,6 +5484,8 @@ var counter = 0;
   @extends DS.Adapter
 */
 DS.FixtureAdapter = DS.Adapter.extend({
+  // by default, fixtures are already in normalized form
+  serializer: null,
 
   simulateRemoteResponse: true,
 
@@ -5747,13 +5785,86 @@ function coerceId(id) {
 }
 
 DS.RESTSerializer = DS.JSONSerializer.extend({
-  normalize: function(type, hash, requestType) {
-    this.normalizeId(hash, requestType);
-    this.normalizeAttributes(hash, requestType);
+  /**
+    Normalizes a part of the JSON payload returned by
+    the server. You should override this method, munge the hash
+    and call super if you have generic normalization to do.
+
+    It takes the type of the record that is being normalized
+    (as a DS.Model class), the property where the hash was
+    originally found, and the hash to normalize.
+
+    For example, if you have a payload that looks like this:
+
+    ```js
+    {
+      "post": {
+        "id": 1,
+        "title": "Rails is omakase",
+        "comments": [ 1, 2 ]
+      },
+      "comments": [{
+        "id": 1,
+        "body": "FIRST"
+      }, {
+        "id": 2,
+        "body": "Rails is unagi"
+      }]
+    }
+    ```
+
+    The `normalize` method will be called three times:
+
+    * With `App.Post`, `"posts"` and `{ id: 1, title: "Rails is omakase", ... }`
+    * With `App.Comment`, `"comments"` and `{ id: 1, body: "FIRST" }`
+    * With `App.Comment`, `"comments"` and `{ id: 2, body: "Rails is unagi" }`
+
+    You can use this method, for example, to normalize underscored keys to camelized
+    or other general-purpose normalizations.
+
+    If you want to do normalizations specific to some part of the payload, you
+    can specify those under `normalizeHash`.
+
+    For example, if the `IDs` under `"comments"` are provided as `_id` instead of
+    `id`, you can specify how to normalize just the comments:
+
+    ```js
+    App.PostSerializer = DS.RESTSerializer.extend({
+      normalizeHash: {
+        comments: function(hash) {
+          hash.id = hash._id;
+          delete hash._id;
+          return hash;
+        }
+      }
+    });
+    ```
+
+    The key under `normalizeHash` is just the original key that was in the original
+    payload.
+
+    @method normalize
+    @param {subclass of DS.Model} type
+    @param {String} prop
+    @param {Object} hash
+    @returns Object
+  */
+  normalize: function(type, prop, hash) {
+    this.normalizeId(hash);
+    this.normalizeAttributes(hash);
+
+    if (this.normalizeHash && this.normalizeHash[prop]) {
+      return this.normalizeHash[prop](hash);
+    }
+
     return hash;
   },
 
-  normalizeId: function(hash, requestType) {
+  /**
+    @method normalizeId
+    @private
+  */
+  normalizeId: function(hash) {
     var primaryKey = get(this, 'primaryKey');
 
     if (primaryKey === 'id') { return; }
@@ -5762,7 +5873,11 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
     delete hash[primaryKey];
   },
 
-  normalizeAttributes: function(hash, requestType) {
+  /**
+    @method normalizeAttributes
+    @private
+  */
+  normalizeAttributes: function(hash) {
     var attrs = get(this, 'attrs');
 
     if (!attrs) { return; }
@@ -5773,7 +5888,258 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
       hash[key] = hash[payloadKey];
       delete hash[payloadKey];
     }
-  }
+  },
+
+  /**
+    Called when the server has returned a payload representing
+    a single record, such as in response to a `find` or `save`.
+
+    It is your opportunity to clean up the server's response into the normalized
+    form expected by Ember Data.
+
+    If you want, you can just restructure the top-level of your payload, and
+    do more fine-grained normalization in the `normalize` method.
+
+    For example, if you have a payload like this in response to a request for
+    post 1:
+
+    ```js
+    {
+      "id": 1,
+      "title": "Rails is omakase",
+
+      "_embedded": {
+        "comment": [{
+          "_id": 1,
+          "comment_title": "FIRST"
+        }, {
+          "_id": 2,
+          "comment_title": "Rails is unagi"
+        }]
+      }
+    }
+    ```
+
+    You could implement a serializer that looks like this to get your payload
+    into shape:
+
+    ```js
+    App.PostSerializer = DS.RESTSerializer.extend({
+      // First, restructure the top-level so it's organized by type
+      extractSingle: function(store, type, payload, id, requestType) {
+        var comments = payload._embedded.comment;
+        delete payload._embedded;
+
+        payload = { comments: comments, post: payload };
+        return this._super(store, type, payload, id, requestType);
+      },
+
+      normalizeHash: {
+        // Next, normalize individual comments, which (after `extract`)
+        // are now located under `comments`
+        comments: function(hash) {
+          hash.id = hash._id;
+          hash.title = hash.comment_title;
+          delete hash._id;
+          delete hash.comment_title;
+          return hash;
+        }
+      }
+    })
+    ```
+
+    When you call super from your own implementation of `extractSingle`, the
+    built-in implementation will find the primary record in your normalized
+    payload and push the remaining records into the store.
+
+    The primary record is the single hash found under `post` or the first
+    element of the `posts` array.
+
+    The primary record has special meaning when the record is being created
+    for the first time or updated (`createRecord` or `updateRecord`). In
+    particular, it will update the properties of the record that was saved.
+
+    @param {DS.Store} store
+    @param {subclass of DS.Model} type
+    @param {Object} payload
+    @param {String} id
+    @param {'find'|'createRecord'|'updateRecord'|'deleteRecord'} requestType
+    @returns Object the primary response to the original request
+  */
+  extractSingle: function(store, primaryType, payload, recordId, requestType) {
+    var primaryTypeName = primaryType.typeKey,
+        primaryRecord;
+
+    for (var prop in payload) {
+      // legacy support for singular names
+      if (prop === primaryTypeName) {
+        primaryRecord = this.normalize(primaryType, prop, payload[prop]);
+        continue;
+      }
+
+      var typeName = this.singularize(prop),
+          type = store.modelFor(typeName);
+
+      /*jshint loopfunc:true*/
+      payload[prop].forEach(function(hash) {
+        hash = this.normalize(type, prop, hash);
+
+        var isFirstCreatedRecord = typeName === primaryTypeName && !recordId && !primaryRecord,
+            isUpdatedRecord = typeName === primaryTypeName && coerceId(hash.id) === recordId;
+
+        // find the primary record.
+        //
+        // It's either:
+        // * the record with the same ID as the original request
+        // * in the case of a newly created record that didn't have an ID, the first
+        //   record in the Array
+        if (isFirstCreatedRecord || isUpdatedRecord) {
+          primaryRecord = hash;
+        } else {
+          store.push(typeName, hash);
+        }
+      }, this);
+    }
+
+    return primaryRecord;
+  },
+
+  /**
+    Called when the server has returned a payload representing
+    multiple records, such as in response to a `findAll` or `findQuery`.
+
+    It is your opportunity to clean up the server's response into the normalized
+    form expected by Ember Data.
+
+    If you want, you can just restructure the top-level of your payload, and
+    do more fine-grained normalization in the `normalize` method.
+
+    For example, if you have a payload like this in response to a request for
+    all posts:
+
+    ```js
+    {
+      "_embedded": {
+        "post": [{
+          "id": 1,
+          "title": "Rails is omakase"
+        }, {
+          "id": 2,
+          "title": "The Parley Letter"
+        }],
+        "comment": [{
+          "_id": 1,
+          "comment_title": "Rails is unagi"
+          "post_id": 1
+        }, {
+          "_id": 2,
+          "comment_title": "Don't tread on me",
+          "post_id": 2
+        }]
+      }
+    }
+    ```
+
+    You could implement a serializer that looks like this to get your payload
+    into shape:
+
+    ```js
+    App.PostSerializer = DS.RESTSerializer.extend({
+      // First, restructure the top-level so it's organized by type
+      // and the comments are listed under a post's `comments` key.
+      extractArray: function(store, type, payload, id, requestType) {
+        var posts = payload._embedded.post;
+        var comments = [];
+        var postCache = {};
+
+        posts.forEach(function(post) {
+          post.comments = [];
+          postCache[post.id] = post;
+        });
+
+        payload._embedded.comment.forEach(function(comment) {
+          comments.push(comment);
+          postCache[comment.post_id].comments.push(comment);
+          delete comment.post_id;
+        }
+
+        payload = { comments: comments, posts: payload };
+
+        return this._super(store, type, payload, id, requestType);
+      },
+
+      normalizeHash: {
+        // Next, normalize individual comments, which (after `extract`)
+        // are now located under `comments`
+        comments: function(hash) {
+          hash.id = hash._id;
+          hash.title = hash.comment_title;
+          delete hash._id;
+          delete hash.comment_title;
+          return hash;
+        }
+      }
+    })
+    ```
+
+    When you call super from your own implementation of `extractArray`, the
+    built-in implementation will find the primary array in your normalized
+    payload and push the remaining records into the store.
+
+    The primary array is the array found under `posts`.
+
+    The primary record has special meaning when responding to `findQuery`
+    or `findHasMany`. In particular, the primary array will become the
+    list of records in the record array that kicked off the request.
+
+    @param {DS.Store} store
+    @param {subclass of DS.Model} type
+    @param {Object} payload
+    @param {'findAll'|'findMany'|'findHasMany'|'findQuery'} requestType
+    @returns {Array<Object>} The primary array that was returned in response
+      to the original query.
+  */
+  extractArray: function(store, primaryType, payload) {
+    var primaryTypeName = primaryType.typeKey,
+        primaryArray;
+
+    for (var prop in payload) {
+      var typeName = this.singularize(prop),
+          type = store.modelFor(typeName),
+          isPrimary = typeName === primaryTypeName;
+
+      /*jshint loopfunc:true*/
+      var normalizedArray = payload[prop].map(function(hash) {
+        return this.normalize(type, prop, hash);
+      }, this);
+
+      if (isPrimary) {
+        primaryArray = normalizedArray;
+      } else {
+        store.pushMany(typeName, normalizedArray);
+      }
+    }
+
+    return primaryArray;
+  },
+
+  /**
+    @private
+    @method pluralize
+    @param {String} key
+  */
+  pluralize: function(key) {
+    return Ember.String.pluralize(key);
+  },
+
+  /**
+    @private
+    @method singularize
+    @param {String} key
+  */
+  singularize: function(key) {
+    return Ember.String.singularize(key);
+  },
 });
 
 /**
@@ -5837,6 +6203,8 @@ DS.RESTSerializer = DS.JSONSerializer.extend({
   @extends DS.Adapter
 */
 DS.RESTAdapter = DS.Adapter.extend({
+  defaultSerializer: '_rest',
+
   /**
     Called by the store in order to fetch the JSON for a given
     type and ID.
@@ -5924,7 +6292,7 @@ DS.RESTAdapter = DS.Adapter.extend({
     It makes an Ajax request to a URL computed by `buildURL`, and returns a
     promise for the resulting payload.
 
-    @method findQuery
+    @method findMany
     @see RESTAdapter/buildURL
     @see RESTAdapter/ajax
     @param {DS.Store} store
@@ -6055,7 +6423,7 @@ DS.RESTAdapter = DS.Adapter.extend({
     @returns String
   */
   buildURL: function(type, id) {
-    var url = "/" + this.pluralize(type.typeKey);
+    var url = "/" + Ember.String.pluralize(type.typeKey);
     if (id) { url += "/" + id; }
 
     return url;
@@ -6068,337 +6436,13 @@ DS.RESTAdapter = DS.Adapter.extend({
            this.container.lookup('serializer:_rest');
   },
 
-  /**
-    Called when the server has returned a payload representing
-    a single record, such as in response to a `find` or `save`.
-
-    It is your opportunity to clean up the server's response into the normalized
-    form expected by Ember Data.
-
-    If you want, you can just restructure the top-level of your payload, and
-    do more fine-grained normalization in the `normalize` method.
-
-    For example, if you have a payload like this in response to a request for
-    post 1:
-
-    ```js
-    {
-      "id": 1,
-      "title": "Rails is omakase",
-
-      "_embedded": {
-        "comment": [{
-          "_id": 1,
-          "comment_title": "FIRST"
-        }, {
-          "_id": 2,
-          "comment_title": "Rails is unagi"
-        }]
-      }
-    }
-    ```
-
-    You could implement an adapter that looks like this to get your payload
-    into shape:
-
-    ```js
-    App.PostAdapter = DS.Adapter.extend({
-      // First, restructure the top-level so it's organized by type
-      extract: function(store, type, payload, id, requestType) {
-        var comments = payload._embedded.comment;
-        delete payload._embedded;
-
-        payload = { comments: comments, post: payload };
-        return this._super(store, type, payload, id, requestType);
-      },
-
-      normalizeHash: {
-        // Next, normalize individual comments, which (after `extract`)
-        // are now located under `comments`
-        comments: function(hash) {
-          hash.id = hash._id;
-          hash.title = hash.comment_title;
-          delete hash._id;
-          delete hash.comment_title;
-          return hash;
-        }
-      }
-    })
-    ```
-
-    When you call super from your own implementation of `extractSingle`, the
-    built-in implementation will find the primary record in your normalized
-    payload and push the remaining records into the store.
-
-    The primary record is the single hash found under `post` or the first
-    element of the `posts` array.
-
-    The primary record has special meaning when the record is being created
-    for the first time or updated (`createRecord` or `updateRecord`). In
-    particular, it will update the properties of the record that was saved.
-
-    @param {DS.Store} store
-    @param {subclass of DS.Model} type
-    @param {Object} payload
-    @param {String} id
-    @param {'find'|'createRecord'|'updateRecord'|'deleteRecord'} requestType
-    @returns Object the primary response to the original request
-  */
-  extractSingle: function(store, primaryType, payload, recordId, requestType) {
-    var primaryTypeName = primaryType.typeKey,
-        primaryRecord;
-
-    for (var prop in payload) {
-      // legacy support for singular names
-      if (prop === primaryTypeName) {
-        primaryRecord = this.normalize(primaryType, prop, payload[prop]);
-        continue;
-      }
-
-      var typeName = this.singularize(prop),
-          type = store.modelFor(typeName);
-
-      /*jshint loopfunc:true*/
-      payload[prop].forEach(function(hash) {
-        hash = this.normalize(type, prop, hash);
-
-        var isFirstCreatedRecord = typeName === primaryTypeName && !recordId && !primaryRecord,
-            isUpdatedRecord = typeName === primaryTypeName && coerceId(hash.id) === recordId;
-
-        // find the primary record.
-        //
-        // It's either:
-        // * the record with the same ID as the original request
-        // * in the case of a newly created record that didn't have an ID, the first
-        //   record in the Array
-        if (isFirstCreatedRecord || isUpdatedRecord) {
-          primaryRecord = hash;
-        } else {
-          store.push(typeName, hash);
-        }
-      }, this);
-    }
-
-    return primaryRecord;
-  },
-
-  /**
-    Called when the server has returned a payload representing
-    multiple records, such as in response to a `findAll` or `findQuery`.
-
-    It is your opportunity to clean up the server's response into the normalized
-    form expected by Ember Data.
-
-    If you want, you can just restructure the top-level of your payload, and
-    do more fine-grained normalization in the `normalize` method.
-
-    For example, if you have a payload like this in response to a request for
-    all posts:
-
-    ```js
-    {
-      "_embedded": {
-        "post": [{
-          "id": 1,
-          "title": "Rails is omakase"
-        }, {
-          "id": 2,
-          "title": "The Parley Letter"
-        }],
-        "comment": [{
-          "_id": 1,
-          "comment_title": "Rails is unagi"
-          "post_id": 1
-        }, {
-          "_id": 2,
-          "comment_title": "Don't tread on me",
-          "post_id": 2
-        }]
-      }
-    }
-    ```
-
-    You could implement an adapter that looks like this to get your payload
-    into shape:
-
-    ```js
-    App.PostAdapter = DS.Adapter.extend({
-      // First, restructure the top-level so it's organized by type
-      // and the comments are listed under a post's `comments` key.
-      extract: function(store, type, payload, id, requestType) {
-        var posts = payload._embedded.post;
-        var comments = [];
-        var postCache = {};
-
-        posts.forEach(function(post) {
-          post.comments = [];
-          postCache[post.id] = post;
-        });
-
-        payload._embedded.comment.forEach(function(comment) {
-          comments.push(comment);
-          postCache[comment.post_id].comments.push(comment);
-          delete comment.post_id;
-        }
-
-        payload = { comments: comments, posts: payload };
-
-        return this._super(store, type, payload, id, requestType);
-      },
-
-      normalizeHash: {
-        // Next, normalize individual comments, which (after `extract`)
-        // are now located under `comments`
-        comments: function(hash) {
-          hash.id = hash._id;
-          hash.title = hash.comment_title;
-          delete hash._id;
-          delete hash.comment_title;
-          return hash;
-        }
-      }
-    })
-    ```
-
-    When you call super from your own implementation of `extractMany`, the
-    built-in implementation will find the primary array in your normalized
-    payload and push the remaining records into the store.
-
-    The primary array is the array found under `posts`.
-
-    The primary record has special meaning when responding to `findQuery`
-    or `findHasMany`. In particular, the primary array will become the
-    list of records in the record array that kicked off the request.
-
-    @param {DS.Store} store
-    @param {subclass of DS.Model} type
-    @param {Object} payload
-    @param {'findAll'|'findMany'|'findHasMany'|'findQuery'} requestType
-    @returns {Array<Object>} The primary array that was returned in response
-      to the original query.
-  */
-  extractArray: function(store, primaryType, payload) {
-    var primaryTypeName = primaryType.typeKey,
-        primaryArray;
-
-    for (var prop in payload) {
-      var typeName = this.singularize(prop),
-          type = store.modelFor(typeName),
-          isPrimary = typeName === primaryTypeName;
-
-      /*jshint loopfunc:true*/
-      var normalizedArray = payload[prop].map(function(hash) {
-        return this.normalize(type, prop, hash);
-      }, this);
-
-      if (isPrimary) {
-        primaryArray = normalizedArray;
-      } else {
-        store.pushMany(typeName, normalizedArray);
-      }
-    }
-
-    return primaryArray;
-  },
-
-  /**
-    Normalizes a part of the JSON payload returned by
-    the server. You should override this method, munge the hash
-    and call super if you have generic normalization to do.
-
-    It takes the type of the record that is being normalized
-    (as a DS.Model class), the property where the hash was
-    originally found, and the hash to normalize.
-
-    For example, if you have a payload that looks like this:
-
-    ```js
-    {
-      "post": {
-        "id": 1,
-        "title": "Rails is omakase",
-        "comments": [ 1, 2 ]
-      },
-      "comments": [{
-        "id": 1,
-        "body": "FIRST"
-      }, {
-        "id": 2,
-        "body": "Rails is unagi"
-      }]
-    }
-    ```
-
-    The `normalize` method will be called three times:
-
-    * With `App.Post`, `"posts"` and `{ id: 1, title: "Rails is omakase", ... }`
-    * With `App.Comment`, `"comments"` and `{ id: 1, body: "FIRST" }`
-    * With `App.Comment`, `"comments"` and `{ id: 2, body: "Rails is unagi" }`
-
-    You can use this method, for example, to normalize underscored keys to camelized
-    or other general-purpose normalizations.
-
-    If you want to do normalizations specific to some part of the payload, you
-    can specify those under `normalizeHash`.
-
-    For example, if the `IDs` under `"comments"` are provided as `_id` instead of
-    `id`, you can specify how to normalize just the comments:
-
-    ```js
-    App.PostAdapter = DS.RESTAdapter.extend({
-      normalizeHash: {
-        comments: function(hash) {
-          hash.id = hash._id;
-          delete hash._id;
-          return hash;
-        }
-      }
-    });
-    ```
-
-    The key under `normalizeHash` is just the original key that was in the original
-    payload.
-
-    @method normalize
-    @param {subclass of DS.Model} type
-    @param {String} prop
-    @param {Object} hash
-    @returns Object
-  */
-  normalize: function(type, prop, hash) {
-    var serializer = this.serializerFor(type.typeKey);
-
-    if (this.normalizeHash && this.normalizeHash[prop]) {
-      return this.normalizeHash[prop](hash);
-    }
-
-    return serializer.normalize(type, hash);
-  },
-
-  /**
-    @private
-    @method pluralize
-    @param {String} key
-  */
-  pluralize: function(key) {
-    return Ember.String.pluralize(key);
-  },
-
-  /**
-    @private
-    @method singularize
-    @param {String} key
-  */
-  singularize: function(key) {
-    return Ember.String.singularize(key);
-  },
 
   /**
     Takes a URL, an HTTP method and a hash of data, and makes an
     HTTP request.
 
     When the server responds with a payload, Ember Data will call into `extractSingle`
-    or `extractMany` (depending on whether the original query was for one record or
+    or `extractArray` (depending on whether the original query was for one record or
     many records).
 
     By default, it has the following behavior:
