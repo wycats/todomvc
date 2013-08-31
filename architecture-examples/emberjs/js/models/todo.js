@@ -1,4 +1,6 @@
-/*global Todos DS Ember */
+/*global Todos*/
+/*global DS*/
+/*global Ember*/
 'use strict';
 
 Todos.Todo = DS.Model.extend({
@@ -6,8 +8,6 @@ Todos.Todo = DS.Model.extend({
 	isCompleted: DS.attr('boolean'),
 
 	todoDidChange: function () {
-		Ember.run.once(this, function () {
-			this.get('store').commit();
-		});
+		Ember.run.once(this, 'save');
 	}.observes('isCompleted', 'title')
 });
