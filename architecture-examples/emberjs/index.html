@@ -17,7 +17,7 @@
 					<section id="main">
 						<ul id="todo-list">
 							{{#each filteredTodos itemController="todo"}}
-								<li {{bindAttr class="isCompleted:completed isEditing:editing"}}>
+								<li {{bind-attr class="isCompleted:completed isEditing:editing"}}>
 									{{#if isEditing}}
 										{{edit-todo class="edit" value=title text-cleared="removeTodo" focus-out="doneEditing" insert-newline="doneEditing"}}
 									{{else}}
@@ -34,17 +34,17 @@
 						<span id="todo-count">{{{remainingFormatted}}}</span>
 						<ul id="filters">
 							<li>
-								{{#linkTo "todos.index" activeClass="selected"}}All{{/linkTo}}
+								{{#link-to "todos.index" activeClass="selected"}}All{{/link-to}}
 							</li>
 							<li>
-								{{#linkTo "todos.active" activeClass="selected"}}Active{{/linkTo}}
+								{{#link-to "todos.active" activeClass="selected"}}Active{{/link-to}}
 							</li>
 							<li>
-								{{#linkTo "todos.completed" activeClass="selected"}}Completed{{/linkTo}}
+								{{#link-to "todos.completed" activeClass="selected"}}Completed{{/link-to}}
 							</li>
 						</ul>
 						{{#if hasCompleted}}
-							<button id="clear-completed" {{action "clearCompleted"}} {{bindAttr class="buttonClass:hidden"}}>
+							<button id="clear-completed" {{action "clearCompleted"}} {{bind-attr class="buttonClass:hidden"}}>
 								Clear completed ({{completed}})
 							</button>
 						{{/if}}
